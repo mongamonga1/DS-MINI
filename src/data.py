@@ -42,6 +42,9 @@ class CellRecord:
     voltage: np.ndarray
     q10: np.ndarray | None
     q100: np.ndarray | None
+    full_qd: pd.DataFrame
+    cycle5_time: np.ndarray | None
+    cycle5_current: np.ndarray | None
 
 
 @dataclass
@@ -173,14 +176,20 @@ def load_battery_data(config: ExperimentConfig) -> DataBundle:
 
                 early_mask = (cycles >= 1) & (cycles <= 100)
                 summary = pd.DataFrame({"cycle": cycles[early_mask]})
+                qd_values = np.full(cycles.shape, np.nan, dtype=float)
                 for analysis_name, raw_name in SUMMARY_FIELDS.items():
                     values = _numeric_vector(raw_file, raw_summary[raw_name])
                     if len(values) != len(cycles):
                         raise ValueError(f"{cell_id}: {raw_name} 길이가 다릅니다.")
+                    if analysis_name == "qd":
+                        qd_values = values
                     summary[analysis_name] = values[early_mask]
+                full_qd = pd.DataFrame({"cycle": cycles, "qd": qd_values})
 
                 first_cycle_empty = batch_name == "Batch 1" and bool(
-                    summary["cycle"].eq(1).any()
+                    (summary["cycle"].eq(1) & summary[
+                        ["qd", "temperature_avg", "temperature_min", "temperature_max", "charge_time"]
+                    ].eq(0).all(axis=1)).any()
                 )
                 if first_cycle_empty:
                     first = summary["cycle"].eq(1)
@@ -216,6 +225,27 @@ def load_battery_data(config: ExperimentConfig) -> DataBundle:
                             ),
                         )
 
+                cycle5_time = None
+                cycle5_current = None
+                cycle5_positions = np.flatnonzero(cycles == 5)
+                if (
+                    cycle5_positions.size == 1
+                    and "I" in raw_cycles
+                    and "t" in raw_cycles
+                ):
+                    cycle_index = int(cycle5_positions[0])
+                    current_values = _numeric_vector(
+                        raw_file,
+                        _reference_item(raw_file, raw_cycles, "I", cycle_index),
+                    )
+                    time_values = _numeric_vector(
+                        raw_file,
+                        _reference_item(raw_file, raw_cycles, "t", cycle_index),
+                    )
+                    if len(current_values) == len(time_values):
+                        cycle5_current = current_values
+                        cycle5_time = time_values
+
                 life_values = _numeric_vector(
                     raw_file, _reference_item(raw_file, batch, "cycle_life", cell_number)
                 )
@@ -249,6 +279,9 @@ def load_battery_data(config: ExperimentConfig) -> DataBundle:
                         voltage=voltage,
                         q10=curves.get(10),
                         q100=curves.get(100),
+                        full_qd=full_qd,
+                        cycle5_time=cycle5_time,
+                        cycle5_current=cycle5_current,
                     )
                 )
                 quality_rows.append(
@@ -263,6 +296,7 @@ def load_battery_data(config: ExperimentConfig) -> DataBundle:
                         "barcode_status": "확인 가능" if barcode else "원본 문자열 해석 불가",
                         "q10_available": 10 in curves,
                         "q100_available": 100 in curves,
+                        "cycle5_current_available": cycle5_current is not None,
                     }
                 )
 

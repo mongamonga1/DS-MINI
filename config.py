@@ -56,6 +56,10 @@ class ExperimentConfig:
     corrupted_temperature_cells: tuple[str, ...] = (
         "2018-02-20_batchdata_updated_struct_errorcorrect:cell038",
     )
+    rest_current_threshold_amp: float = 0.01
+    long_rest_threshold_minutes: float = 2.0
+    show_eda_plots: bool = True
+    life_histogram_range: tuple[float, float] = (150.0, 2300.0)
     target_mape_pct: float = 9.1
 
     def validate(self) -> None:
@@ -65,6 +69,8 @@ class ExperimentConfig:
             raise ValueError("검증 셀 수와 CV 수를 확인하세요.")
         if self.top_k_stage1 < 1 or self.top_k_stage2 < 1:
             raise ValueError("단계별 생존 후보 수는 1 이상이어야 합니다.")
+        if self.rest_current_threshold_amp <= 0 or self.long_rest_threshold_minutes <= 0:
+            raise ValueError("무전류·긴 휴지 구간 기준은 양수여야 합니다.")
         if set(self.model_names) != set(self.default_model_params):
             raise ValueError("모델 후보와 기본 매개변수의 모델 이름이 다릅니다.")
         if set(self.model_names) != set(self.tuning_grids):

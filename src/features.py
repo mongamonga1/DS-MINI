@@ -285,7 +285,18 @@ def all_feature_columns(feature_sets: dict[str, FeatureSet]) -> tuple[str, ...]:
             "normalized_delta_q_min",
         }
     )
-    forbidden = {"cell_id", "batch", "cycle_life", "charging_policy"}
+    forbidden = {
+        "cell_id",
+        "batch",
+        "cycle_life",
+        "charging_policy",
+        "protocol_variant",
+        "rest_group",
+        "cycle5_longest_zero_current_minutes",
+        "full_qd",
+        "last_cycle",
+        "knee",
+    }
     if forbidden & base_columns:
-        raise ValueError("입력 피처에 식별자·정답·배치가 포함되었습니다.")
+        raise ValueError("입력 피처에 식별자·정답·설명용 또는 후기 정보가 포함되었습니다.")
     return tuple(sorted(base_columns))

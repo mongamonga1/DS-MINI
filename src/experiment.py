@@ -11,6 +11,7 @@ import pandas as pd
 
 from config import ExperimentConfig
 from .data import DataBundle, SplitBundle, load_battery_data, make_cell_splits
+from .eda import build_eda_tables
 from .features import (
     FeatureSet,
     all_feature_columns,
@@ -42,6 +43,7 @@ class ExperimentResult:
     split_assignments: pd.DataFrame
     cv_folds: pd.DataFrame
     feature_catalog: pd.DataFrame
+    eda_tables: dict[str, pd.DataFrame]
     stage_results: dict[str, pd.DataFrame]
     selection_history: dict[str, pd.DataFrame]
     final_configurations: pd.DataFrame
@@ -73,6 +75,14 @@ def _settings_table(config: ExperimentConfig, data_dir) -> pd.DataFrame:
             {"설정": "주 선택 지표", "값": "CV 평균 MAPE"},
             {"설정": "1차 분기별 생존 수", "값": config.top_k_stage1},
             {"설정": "확장 분기별 생존 수", "값": config.top_k_stage2},
+            {
+                "설정": "무전류 기준",
+                "값": f"|I| < {config.rest_current_threshold_amp} A",
+            },
+            {
+                "설정": "긴 무전류 구간",
+                "값": f"> {config.long_rest_threshold_minutes}분",
+            },
             {"설정": "최종 평가", "값": config.run_final_evaluation},
         ]
     )
@@ -241,7 +251,7 @@ def _gap_table(performance: pd.DataFrame, target_mape_pct: float) -> pd.DataFram
                 },
                 {
                     "configuration": configuration,
-                    "gap": "Test - 9.1",
+                    "gap": f"Test - {target_mape_pct:g}",
                     "value_pct_point": values["Batch2"] - target_mape_pct,
                 },
             ]
@@ -254,16 +264,31 @@ def _error_analysis(
     feature_table: pd.DataFrame,
     split: SplitBundle,
     columns: tuple[str, ...],
+    eda_tables: dict[str, pd.DataFrame],
 ) -> dict[str, pd.DataFrame]:
     predictions = final_predictions.copy()
-    predictions["life_group"] = pd.cut(
-        predictions["actual"],
-        bins=[-np.inf, 500, 1000, np.inf],
-        right=False,
-        labels=["<500", "500-1000", ">1000"],
+    explanatory = eda_tables["rest_cells"][
+        [
+            "cell_id",
+            "protocol_variant",
+            "cycle5_longest_zero_current_minutes",
+            "rest_group",
+        ]
+    ]
+    predictions = predictions.merge(
+        explanatory, on="cell_id", how="left", validate="one_to_one"
+    )
+    predictions["life_group"] = np.select(
+        [predictions["actual"].lt(500), predictions["actual"].gt(1000)],
+        ["<500", ">1000"], default="500-1000",
     )
     group_rows: list[dict] = []
-    for group_column in ("life_group", "charging_policy"):
+    for group_column in (
+        "life_group",
+        "charging_policy",
+        "protocol_variant",
+        "rest_group",
+    ):
         for group_name, group in predictions.groupby(group_column, observed=True, sort=False):
             group_rows.append(
                 {
@@ -338,6 +363,7 @@ class ExperimentRunner:
         self.split: SplitBundle | None = None
         self.feature_table: pd.DataFrame | None = None
         self.feature_quality = pd.DataFrame()
+        self.eda_tables: dict[str, pd.DataFrame] = {}
         self.base_feature_sets: dict[str, FeatureSet] = {}
         self.all_feature_sets: dict[str, FeatureSet] = {}
         self.columns: tuple[str, ...] = ()
@@ -378,7 +404,7 @@ class ExperimentRunner:
     def load_data_and_split(self) -> DataBundle:
         if self.data is not None:
             return self.data
-        self._announce("[1/9] Batch1·2 원본 읽기와 품질 처리")
+        self._announce("[1/10] Batch1·2 원본 읽기와 품질 처리")
         self.data = load_battery_data(self.config)
         self.split = make_cell_splits(self.data.metadata, self.config)
         return self.data
@@ -388,7 +414,7 @@ class ExperimentRunner:
             return self.feature_table
         if self.data is None:
             raise RuntimeError("원본 읽기·분할 단계를 먼저 실행하세요.")
-        self._announce("[2/9] 초기 100사이클 피처 계산")
+        self._announce("[2/10] 초기 100사이클 피처 계산")
         self.feature_table, self.feature_quality = build_feature_table(self.data.cells)
         self.base_feature_sets = initial_feature_sets()
         self.all_feature_sets = dict(self.base_feature_sets)
@@ -398,12 +424,27 @@ class ExperimentRunner:
             raise ValueError(f"계산되지 않은 공통 피처가 있습니다: {missing_columns}")
         return self.feature_table
 
+    def run_eda(self) -> dict[str, pd.DataFrame]:
+        if self.eda_tables:
+            return self.eda_tables
+        if self.data is None or self.feature_table is None or self.split is None:
+            raise RuntimeError("피처 계산 단계를 먼저 실행하세요.")
+        self._announce("[3/10] Train 근거 EDA와 설명용 배치 진단")
+        self.eda_tables = build_eda_tables(
+            self.data,
+            self.feature_table,
+            self.split,
+            self.columns,
+            self.config,
+        )
+        return self.eda_tables
+
     def run_stage1(self) -> CandidateEvaluation:
         if self.stage1 is not None:
             return self.stage1
-        if self.feature_table is None or self.split is None:
-            raise RuntimeError("피처 계산 단계를 먼저 실행하세요.")
-        self._announce("[3/9] 전체 피처군 × 모델 × 타깃 1차 CV")
+        if self.feature_table is None or self.split is None or not self.eda_tables:
+            raise RuntimeError("EDA 단계를 먼저 실행하세요.")
+        self._announce("[4/10] 전체 피처군 × 모델 × 타깃 1차 CV")
         self.stage1_candidates = build_initial_candidates(
             self.base_feature_sets, self.config
         )
@@ -426,7 +467,7 @@ class ExperimentRunner:
             return self.stage2
         if self.stage1 is None or self.feature_table is None or self.split is None:
             raise RuntimeError("1차 CV 단계를 먼저 실행하세요.")
-        self._announce("[4/9] 생존 구성의 확장·변화 피처 CV")
+        self._announce("[5/10] 생존 구성의 확장·변화 피처 CV")
         self.stage2_candidates, expanded_sets = _expanded_candidates(
             self.stage1_survivors, self.base_feature_sets, self.config
         )
@@ -470,7 +511,7 @@ class ExperimentRunner:
             return self.stage3
         if self.stage2 is None or self.feature_table is None or self.split is None:
             raise RuntimeError("확장·변화 피처 CV 단계를 먼저 실행하세요.")
-        self._announce("[5/9] 생존 후보 매개변수 재탐색")
+        self._announce("[6/10] 생존 후보 매개변수 재탐색")
         self.stage3_candidates = build_tuned_candidates(
             self.stage2_survivors, self.all_feature_sets, self.config
         )
@@ -520,7 +561,7 @@ class ExperimentRunner:
             return self.performance
         if self.stage3 is None or self.feature_table is None or self.split is None:
             raise RuntimeError("매개변수 재탐색 단계를 먼저 실행하세요.")
-        self._announce("[6/9] Train 36셀 최종 학습")
+        self._announce("[7/10] Train 36셀 최종 학습")
         self.performance, self.predictions, self.models = _performance_and_predictions(
             self.representatives,
             self.stage3,
@@ -530,7 +571,7 @@ class ExperimentRunner:
             self.columns,
             self.config,
         )
-        self._announce("[7/9] Valid 10셀·Batch2 39셀 고정 평가")
+        self._announce("[8/10] Valid 10셀·Batch2 39셀 고정 평가")
         self.gaps = _gap_table(self.performance, self.config.target_mape_pct)
         return self.performance
 
@@ -542,9 +583,13 @@ class ExperimentRunner:
         final_predictions = self.predictions.get("final:Batch2")
         if final_predictions is None:
             raise RuntimeError("최종 학습·평가 단계를 먼저 실행하세요.")
-        self._announce("[8/9] 단수명·프로토콜·큰 오차 분석")
+        self._announce("[9/10] 단수명·프로토콜·무전류 그룹 오류 분석")
         self.error_analysis = _error_analysis(
-            final_predictions, self.feature_table, self.split, self.columns
+            final_predictions,
+            self.feature_table,
+            self.split,
+            self.columns,
+            self.eda_tables,
         )
         return self.error_analysis
 
@@ -562,6 +607,7 @@ class ExperimentRunner:
             feature_catalog=_catalog(self.all_feature_sets)
             if self.all_feature_sets
             else pd.DataFrame(),
+            eda_tables=self.eda_tables,
             stage_results={
                 name: evaluation.summary
                 for name, evaluation in (
@@ -591,13 +637,14 @@ class ExperimentRunner:
     def run_all(self) -> ExperimentResult:
         self.load_data_and_split()
         self.build_features()
+        self.run_eda()
         self.run_stage1()
         self.run_stage2()
         self.run_stage3()
         if self.config.run_final_evaluation:
             self.run_final_evaluation()
             self.run_error_analysis()
-        self._announce("[9/9] 공통 결과 객체 구성 완료")
+        self._announce("[10/10] 공통 결과 객체 구성 완료")
         return self.result()
 
 
