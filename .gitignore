@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+
+# 대용량 원본 데이터는 저장소에 포함하지 않습니다.
+data/raw/*
+!data/raw/.gitkeep
