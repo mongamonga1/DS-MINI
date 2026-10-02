@@ -37,12 +37,12 @@ DS-MINI/
 
 ## 설치
 
-Python 3.14 환경에서 확인한 패키지 버전을 `requirements.txt`에 고정했습니다.
+Python 3.14에서 분석을 실행했습니다. 분석 라이브러리와 노트북 실행 도구의 설치 버전은 `requirements.txt`에 지정되어 있습니다.
 
 ### macOS·Linux
 
 ```bash
-git clone <저장소 주소>
+git clone https://github.com/mongamonga1/DS-MINI.git
 cd DS-MINI
 
 python -m venv .venv
@@ -55,7 +55,7 @@ python -m ipykernel install --user --name ds-mini --display-name "Python (DS-MIN
 ### Windows PowerShell
 
 ```powershell
-git clone <저장소 주소>
+git clone https://github.com/mongamonga1/DS-MINI.git
 cd DS-MINI
 
 python -m venv .venv
